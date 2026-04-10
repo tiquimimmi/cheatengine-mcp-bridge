@@ -489,6 +489,78 @@ def ping() -> str:
     """Check connectivity and get version info."""
     return format_result(ce_client.send_command("ping"))
 
+# --- DEBUGGER CONTROL (Unit 10) ---
+
+@mcp.tool()
+def debug_process(interface: int = 0) -> str:
+    """Start the CE debugger for the currently opened process.
+
+    interface: CE debugger interface enum.
+      0 = default, 1 = Windows native, 2 = VEH debugger,
+      3 = kernel debugger (DBK), 4 = DBVM.
+    Requires a process to be attached. Returns {success, interface_used, interface_name}.
+    """
+    return format_result(ce_client.send_command("debug_process", {"interface": interface}))
+
+@mcp.tool()
+def debug_is_debugging() -> str:
+    """Check whether the CE debugger has been started.
+
+    Always safe to call; no process guard. Returns {success, is_debugging: bool}.
+    """
+    return format_result(ce_client.send_command("debug_is_debugging"))
+
+@mcp.tool()
+def debug_get_current_debugger_interface() -> str:
+    """Return the active debugger interface used by CE.
+
+    Returns {success, interface: int | null, interface_name: str}.
+    interface_name values: 'windows_native', 'veh', 'kernel', 'mac_native', 'gdb', 'none'.
+    """
+    return format_result(ce_client.send_command("debug_get_current_debugger_interface"))
+
+@mcp.tool()
+def debug_break_thread(thread_id: int) -> str:
+    """Break a specific thread by its thread ID.
+
+    The thread may not stop instantly — it must be scheduled to run first.
+    Requires the debugger to be attached. Returns {success}.
+    """
+    return format_result(ce_client.send_command("debug_break_thread", {"thread_id": thread_id}))
+
+@mcp.tool()
+def debug_continue(method: str = "run") -> str:
+    """Continue execution from a breakpoint.
+
+    method: one of 'run' (co_run), 'step_into' (co_stepinto), 'step_over' (co_stepover).
+    Requires the debugger to be attached. Returns {success}.
+    """
+    return format_result(ce_client.send_command("debug_continue", {"method": method}))
+
+@mcp.tool()
+def debug_detach() -> str:
+    """Detach the debugger from the target process if possible.
+
+    Returns {success, detached: bool}. Safe to call when no debugger is active.
+    """
+    return format_result(ce_client.send_command("debug_detach"))
+
+@mcp.tool()
+def pause_process() -> str:
+    """Pause (freeze) the currently opened process using CE's global pause() function.
+
+    Requires a process to be attached. Returns {success}.
+    """
+    return format_result(ce_client.send_command("pause_process"))
+
+@mcp.tool()
+def unpause_process() -> str:
+    """Resume (unfreeze) the currently opened process using CE's global unpause() function.
+
+    Requires a process to be attached. Returns {success}.
+    """
+    return format_result(ce_client.send_command("unpause_process"))
+
 if __name__ == "__main__":
     try:
         debug_log("Starting FastMCP server (v11/v99 compatible)...")
