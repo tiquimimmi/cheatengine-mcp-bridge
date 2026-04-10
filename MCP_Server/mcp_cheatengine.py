@@ -489,6 +489,51 @@ def ping() -> str:
     """Check connectivity and get version info."""
     return format_result(ce_client.send_command("ping"))
 
+# --- UNIT-11: DEBUG CONTEXT + PER-THREAD BREAKPOINTS ---
+
+@mcp.tool()
+def debug_get_context(extra_regs: bool = False) -> str:
+    """Get the current thread's CPU register context. Set extra_regs=True to include XMM0-15 and FP0-7."""
+    return format_result(ce_client.send_command("debug_get_context", {"extra_regs": extra_regs}))
+
+@mcp.tool()
+def debug_set_context(registers: dict) -> str:
+    """Set CPU register values in the paused thread. Pass a dict like {\"RAX\": \"0x1234\", \"RIP\": \"0x140001000\"}."""
+    return format_result(ce_client.send_command("debug_set_context", {"registers": registers}))
+
+@mcp.tool()
+def debug_get_xmm_pointer(xmm_nr: int = 0) -> str:
+    """Return the CE-local memory address of an XMM register (0-15) for the currently broken thread."""
+    return format_result(ce_client.send_command("debug_get_xmm_pointer", {"xmm_nr": xmm_nr}))
+
+@mcp.tool()
+def debug_set_last_branch_recording(enable: bool) -> str:
+    """Enable or disable Intel LBR (Last Branch Recording). Requires kernel-mode debugger."""
+    return format_result(ce_client.send_command("debug_set_last_branch_recording", {"enable": enable}))
+
+@mcp.tool()
+def debug_get_last_branch_record(index: int) -> str:
+    """Get the from/to addresses of a Last Branch Record entry at the given index."""
+    return format_result(ce_client.send_command("debug_get_last_branch_record", {"index": index}))
+
+@mcp.tool()
+def debug_set_breakpoint_for_thread(thread_id: int, address: str, size: int = 1, trigger: str = "execute") -> str:
+    """Set a breakpoint that fires only on a specific thread. trigger: execute|write|read|access."""
+    return format_result(ce_client.send_command("debug_set_breakpoint_for_thread", {
+        "thread_id": thread_id,
+        "address": address,
+        "size": size,
+        "trigger": trigger,
+    }))
+
+@mcp.tool()
+def debug_remove_breakpoint_for_thread(thread_id: int, address: str) -> str:
+    """Remove a per-thread breakpoint at the given address for the given thread."""
+    return format_result(ce_client.send_command("debug_remove_breakpoint_for_thread", {
+        "thread_id": thread_id,
+        "address": address,
+    }))
+
 if __name__ == "__main__":
     try:
         debug_log("Starting FastMCP server (v11/v99 compatible)...")
