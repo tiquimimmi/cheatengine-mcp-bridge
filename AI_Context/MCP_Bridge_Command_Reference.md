@@ -84,9 +84,9 @@
 - `success` (bool)
 - `process_name` (str): Name of the attached process.
 - `process_id` (int): PID.
-- `main_module_address` (str): Hex address of main module.
 - `module_count` (int): Number of loaded modules.
-- `modules` (array): List of `{name, address, size, source}` objects.
+- `modules` (array): List of `{name, address, size, source?}` objects.
+- `used_aob_fallback` (bool): True when module discovery used PE/AOB fallback.
 
 **Example request:**
 ```json
@@ -95,7 +95,7 @@
 
 **Example response:**
 ```json
-{"success": true, "process_name": "game.exe", "process_id": 12345, "main_module_address": "0x00400000", "module_count": 5, "modules": [{"name": "game.exe", "address": "0x00400000", "size": 1234567, "source": "enumModules"}]}
+{"success": true, "process_name": "game.exe", "process_id": 12345, "module_count": 5, "used_aob_fallback": false, "modules": [{"name": "game.exe", "address": "0x00400000", "size": 1234567}]}
 ```
 
 **Note**: If anti-cheat blocks `enumModules()`, the bridge uses AOB scanning with PE Export Directory name reading as fallback.
@@ -106,21 +106,27 @@
 
 **Purpose:** List all modules loaded in the target process.
 
-**Parameters:** None
+**Parameters:**
+- `offset` (int, default=0): Pagination offset.
+- `limit` (int, default=100): Page size.
 
 **Returns:** JSON with:
 - `success` (bool)
-- `count` (int)
-- `modules` (array): List of `{name, address, size}` objects.
+- `total` (int)
+- `offset` (int)
+- `limit` (int)
+- `returned` (int)
+- `fallback_used` (bool): True when AOB fallback module discovery was used.
+- `modules` (array): List of `{name, address, size, is_64bit, path, source?}` objects.
 
 **Example request:**
 ```json
-{"method": "enum_modules", "params": {}}
+{"method": "enum_modules", "params": {"offset": 0, "limit": 50}}
 ```
 
 **Example response:**
 ```json
-{"success": true, "count": 15, "modules": [{"name": "kernel32.dll", "address": "0x76000000", "size": 1234567}]}
+{"success": true, "total": 15, "offset": 0, "limit": 50, "returned": 15, "fallback_used": false, "modules": [{"name": "kernel32.dll", "address": "0x76000000", "size": 1234567, "is_64bit": true, "path": "C:\\Windows\\System32\\kernel32.dll"}]}
 ```
 
 ---
@@ -129,21 +135,26 @@
 
 **Purpose:** List all threads in the target process.
 
-**Parameters:** None
+**Parameters:**
+- `offset` (int, default=0): Pagination offset.
+- `limit` (int, default=100): Page size.
 
 **Returns:** JSON with:
 - `success` (bool)
-- `count` (int)
-- `threads` (array): Thread ID strings.
+- `total` (int)
+- `offset` (int)
+- `limit` (int)
+- `returned` (int)
+- `threads` (array): List of `{id_hex, id_int}` objects.
 
 **Example request:**
 ```json
-{"method": "get_thread_list", "params": {}}
+{"method": "get_thread_list", "params": {"offset": 0, "limit": 25}}
 ```
 
 **Example response:**
 ```json
-{"success": true, "count": 8, "threads": ["1234", "5678", "9012"]}
+{"success": true, "total": 8, "offset": 0, "limit": 25, "returned": 8, "threads": [{"id_hex": "000004D2", "id_int": 1234}, {"id_hex": "0000162E", "id_int": 5678}]}
 ```
 
 ---
@@ -233,13 +244,13 @@
 
 **Parameters:**
 - `address` (str, required): Memory address to read.
-- `size` (int, default=256): Number of bytes to read (max 65536).
+- `size` (int, default=256): Number of bytes to read (max 1048576).
 
 **Returns:** JSON with:
 - `success` (bool)
 - `address` (str)
-- `length` (int): Bytes actually read.
-- `hex` (str): Space-separated hex string.
+- `size` (int): Bytes actually read.
+- `data` (str): Space-separated hex string.
 - `bytes` (array): Array of byte integers.
 
 **Example request:**
@@ -249,7 +260,7 @@
 
 **Example response:**
 ```json
-{"success": true, "address": "0x00400000", "length": 8, "hex": "4D 5A 90 00 03 00 00 00", "bytes": [77, 90, 144, 0, 3, 0, 0, 0]}
+{"success": true, "address": "0x00400000", "size": 8, "data": "4D 5A 90 00 03 00 00 00", "bytes": [77, 90, 144, 0, 3, 0, 0, 0]}
 ```
 
 ---
@@ -348,9 +359,8 @@
 - `base` (str)
 - `offsets` (array)
 - `final_address` (str): Address reached after all dereferences.
-- `final_value` (int): Value read at final address.
-- `arch` (str)
-- `chain` (array): Step-by-step dereference log `{step, address, read_value, offset_applied?}`.
+- `final_value` (int|nil): Pointer value read at final address (if readable).
+- `chain` (array): Step-by-step dereference log `{step, address, pointer_value?, offset, hex_offset, description?}`.
 
 **Example request:**
 ```json
@@ -359,7 +369,7 @@
 
 **Example response:**
 ```json
-{"success": true, "base": "0x00400000", "offsets": [60, 0, 24], "final_address": "0x12345678", "final_value": 100, "arch": "x64", "chain": [{"step": 0, "address": "0x00400000", "read_value": "0x00500000"}, {"step": 1, "address": "0x00500000", "offset_applied": 60, "read_value": "0x00600000"}, {"step": 2, "address": "0x00600018", "offset_applied": 24, "read_value": "0x12345678"}]}
+{"success": true, "base": "0x00400000", "offsets": [60, 0, 24], "final_address": "0x12345678", "final_value": 100, "chain": [{"step": 0, "address": "0x00400000", "description": "base"}, {"step": 1, "address": "0x0050003C", "offset": 60, "hex_offset": "+0x3C", "pointer_value": "0x00500000"}]}
 ```
 
 ---
@@ -481,23 +491,21 @@
 
 **Parameters:**
 - `value` (str, required): Value to search for.
-- `type` (str, default=`"exact"`): Scan type — `"exact"`, `"string"`, `"array"`.
+- `type` (str, default=`"dword"`): Value type — `"byte"`, `"word"`, `"dword"`, `"qword"`, `"float"`, `"double"`, `"string"`.
 - `protection` (str, default=`"+W-C"`): Memory protection filter. `+W-C` = writable, not copy-on-write.
 
 **Returns:** JSON with:
 - `success` (bool)
-- `message` (str): Status message.
-- `value` (str): Scanned value.
-- `scan_type` (str)
+- `count` (int): Number of results in found list.
 
 **Example request:**
 ```json
-{"method": "scan_all", "params": {"value": "100", "type": "exact"}}
+{"method": "scan_all", "params": {"value": "100", "type": "dword"}}
 ```
 
 **Example response:**
 ```json
-{"success": true, "message": "Scan started", "value": "100", "scan_type": "exact"}
+{"success": true, "count": 1234}
 ```
 
 ---
@@ -507,21 +515,26 @@
 **Purpose:** Retrieve results from the last `scan_all` operation.
 
 **Parameters:**
-- `max` (int, default=100): Maximum results to return.
+- `offset` (int, default=0): Pagination offset.
+- `limit` (int, default=100): Page size.
+- `max` (int, optional): Backward-compat alias for `limit`.
 
 **Returns:** JSON with:
 - `success` (bool)
-- `count` (int)
-- `addresses` (array): Hex address strings.
+- `total` (int)
+- `offset` (int)
+- `limit` (int)
+- `returned` (int)
+- `results` (array): List of `{address, value}`.
 
 **Example request:**
 ```json
-{"method": "get_scan_results", "params": {"max": 50}}
+{"method": "get_scan_results", "params": {"offset": 0, "limit": 50}}
 ```
 
 **Example response:**
 ```json
-{"success": true, "count": 3, "addresses": ["0x12345678", "0x23456789", "0x34567890"]}
+{"success": true, "total": 3, "offset": 0, "limit": 50, "returned": 3, "results": [{"address": "0x12345678", "value": "100"}]}
 ```
 
 ---
@@ -571,7 +584,7 @@
 - `success` (bool)
 - `pattern` (str)
 - `count` (int)
-- `addresses` (array): Hex address strings.
+- `addresses` (array): List of `{address, value}` objects.
 
 **Example request:**
 ```json
@@ -580,7 +593,7 @@
 
 **Example response:**
 ```json
-{"success": true, "pattern": "48 89 5C 24 ?? 48 89 74 24", "count": 2, "addresses": ["0x00401000", "0x10001234"]}
+{"success": true, "pattern": "48 89 5C 24 ?? 48 89 74 24", "count": 2, "addresses": [{"address": "0x00401000", "value": 4198400}, {"address": "0x10001234", "value": 268439092}]}
 ```
 
 **Tip**: Use `??` as wildcard for unknown bytes.
@@ -598,9 +611,8 @@
 
 **Returns:** JSON with:
 - `success` (bool)
-- `value` (str)
 - `count` (int)
-- `addresses` (array)
+- `addresses` (array): List of `{address, preview}` objects.
 
 **Example request:**
 ```json
@@ -609,7 +621,7 @@
 
 **Example response:**
 ```json
-{"success": true, "value": "Player", "count": 3, "addresses": ["0x12345678", "0x23456789", "0x34567890"]}
+{"success": true, "count": 3, "addresses": [{"address": "0x12345678", "preview": "Player"}, {"address": "0x23456789", "preview": "PlayerName"}]}
 ```
 
 ---
@@ -774,8 +786,12 @@
 **Returns:** JSON with:
 - `success` (bool)
 - `target` (str)
-- `count` (int)
-- `references` (array): List of `{ref_address, instruction}`.
+- `arch` (str): `"x86"` or `"x64"`.
+- `total` (int)
+- `offset` (int)
+- `limit` (int)
+- `returned` (int)
+- `references` (array): List of `{address, instruction}`.
 
 **Example request:**
 ```json
@@ -784,7 +800,7 @@
 
 **Example response:**
 ```json
-{"success": true, "target": "0x00401000", "count": 2, "references": [{"ref_address": "0x00402000", "instruction": "call 0x00401000"}]}
+{"success": true, "target": "0x00401000", "arch": "x64", "total": 2, "offset": 0, "limit": 20, "returned": 2, "references": [{"address": "0x00402000", "instruction": "call 0x00401000"}]}
 ```
 
 ---
@@ -800,7 +816,10 @@
 **Returns:** JSON with:
 - `success` (bool)
 - `function_address` (str)
-- `caller_count` (int)
+- `total` (int)
+- `offset` (int)
+- `limit` (int)
+- `returned` (int)
 - `callers` (array): List of `{caller_address, instruction}`.
 
 **Example request:**
@@ -810,7 +829,7 @@
 
 **Example response:**
 ```json
-{"success": true, "function_address": "0x00401000", "caller_count": 10, "callers": [{"caller_address": "0x00402050", "instruction": "call 0x00401000"}]}
+{"success": true, "function_address": "0x00401000", "total": 10, "offset": 0, "limit": 50, "returned": 10, "callers": [{"caller_address": "0x00402050", "instruction": "call 0x00401000"}]}
 ```
 
 ---
@@ -958,7 +977,7 @@
 
 **Returns:** JSON with:
 - `success` (bool)
-- `removed_count` (int)
+- `removed` (int)
 
 **Example request:**
 ```json
@@ -967,7 +986,7 @@
 
 **Example response:**
 ```json
-{"success": true, "removed_count": 4}
+{"success": true, "removed": 4}
 ```
 
 ---
@@ -984,7 +1003,7 @@
 **Returns:** JSON with:
 - `success` (bool)
 - `count` (int)
-- `regions` (array): List of `{address, readable, writable, executable}`.
+- `regions` (array): List of `{base, size, protection, readable, writable, executable}`.
 
 **Example request:**
 ```json
@@ -993,7 +1012,7 @@
 
 **Example response:**
 ```json
-{"success": true, "count": 50, "regions": [{"address": "0x00400000", "readable": true, "writable": false, "executable": true}]}
+{"success": true, "count": 50, "regions": [{"base": "0x00400000", "size": 4096, "protection": "RX", "readable": true, "writable": false, "executable": true}]}
 ```
 
 ---
@@ -1003,21 +1022,26 @@
 **Purpose:** Get comprehensive memory map using native CE API.
 
 **Parameters:**
-- `max` (int, default=500): Maximum regions.
+- `offset` (int, default=0): Pagination offset.
+- `limit` (int, default=100): Page size.
+- `max` (int, optional): Backward-compat alias for `limit`.
 
 **Returns:** JSON with:
 - `success` (bool)
-- `count` (int)
-- `regions` (array): List of `{base_address, allocation_base, region_size, state, protect, type, readable, writable, executable}`.
+- `total` (int)
+- `offset` (int)
+- `limit` (int)
+- `returned` (int)
+- `regions` (array): List of `{base, allocation_base, size, state, protect, protect_string, type, is_committed, is_reserved, is_free}`.
 
 **Example request:**
 ```json
-{"method": "enum_memory_regions_full", "params": {"max": 200}}
+{"method": "enum_memory_regions_full", "params": {"offset": 0, "limit": 200}}
 ```
 
 **Example response:**
 ```json
-{"success": true, "count": 200, "regions": [{"base_address": "0x00400000", "allocation_base": "0x00400000", "region_size": 4096, "state": "MEM_COMMIT", "protect": "PAGE_EXECUTE_READ", "type": "MEM_IMAGE", "readable": true, "writable": false, "executable": true}]}
+{"success": true, "total": 2000, "offset": 0, "limit": 200, "returned": 200, "regions": [{"base": "0x00400000", "allocation_base": "0x00400000", "size": 4096, "state": 4096, "protect": 32, "protect_string": "RX", "type": 16777216, "is_committed": true, "is_reserved": false, "is_free": false}]}
 ```
 
 ---
@@ -3127,9 +3151,9 @@ Several tools that return potentially large result sets support pagination via `
 **Tools that support pagination:**
 
 - `persistent_scan_get_results` — uses `offset`/`limit`.
-- `get_file_list` — `offset`/`limit` where supported.
-- `get_scan_results` — currently uses `max` (equivalent to `limit`; `offset` not yet supported).
-- `aob_scan`, `find_references`, `find_call_references`, `search_string` — use `limit` to cap results.
+- `enum_modules`, `get_thread_list`, `enum_memory_regions_full`, `find_references`, `find_call_references` — return `total/offset/limit/returned`.
+- `get_scan_results` — supports both `offset` and `limit` (`max` remains a backward-compat alias for `limit`).
+- `aob_scan`, `search_string` — currently support `limit` (no offset).
 
 **Paginating through all scan results:**
 
@@ -3144,7 +3168,7 @@ while True:
     offset += page_size
 ```
 
-**Note**: Tools that return a `count` field alongside `addresses` will report the **total** result count even when paginating, allowing you to calculate total pages.
+**Note**: For paginated tools, use `total`, `offset`, `limit`, and `returned` to drive page iteration.
 
 ---
 
@@ -3154,21 +3178,21 @@ The MCP bridge Python server (`mcp_cheatengine.py`) reads the following environm
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `CE_MCP_TIMEOUT` | int (ms) | 30000 | Timeout in milliseconds for pipe read/write operations. Increase for slow systems or large data transfers. |
+| `CE_MCP_TIMEOUT` | float (seconds) | 30 | Timeout in seconds for each bridge command round-trip. Set `<=0` to disable timeout enforcement. |
 | `CE_MCP_ALLOW_SHELL` | int (0 or 1) | 0 | Set to `1` to enable shell execution tools (`run_command`, `shell_execute`). **Disabled by default for security.** |
 
 **Setting environment variables:**
 
 Windows (Command Prompt):
 ```cmd
-set CE_MCP_TIMEOUT=60000
+set CE_MCP_TIMEOUT=60
 set CE_MCP_ALLOW_SHELL=0
 python mcp_cheatengine.py
 ```
 
 Windows (PowerShell):
 ```powershell
-$env:CE_MCP_TIMEOUT = "60000"
+$env:CE_MCP_TIMEOUT = "60"
 $env:CE_MCP_ALLOW_SHELL = "0"
 python mcp_cheatengine.py
 ```
@@ -3181,7 +3205,7 @@ Claude Desktop `claude_desktop_config.json`:
       "command": "python",
       "args": ["path/to/mcp_cheatengine.py"],
       "env": {
-        "CE_MCP_TIMEOUT": "60000",
+        "CE_MCP_TIMEOUT": "60",
         "CE_MCP_ALLOW_SHELL": "0"
       }
     }

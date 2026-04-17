@@ -551,8 +551,8 @@ local function cmd_get_process_info(params)
             }
         end
 
-        -- Use real process name when available; otherwise use the export-directory name of the first module
-        local name = (process ~= "" and process) or mainModuleName or moduleList[1].name
+        -- Use the best available module-derived process name
+        local name = mainModuleName or (moduleList[1] and moduleList[1].name) or "UnknownProcess"
 
         return {
             success = true,
