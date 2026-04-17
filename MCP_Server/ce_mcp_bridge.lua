@@ -32,20 +32,16 @@ local serverState = {
 
 local function toHex(num)
     if not num then return "nil" end
-    -- Handle both 32-bit and 64-bit addresses correctly
-    -- Lua numbers are doubles, so we need to handle large integers carefully
-    if num < 0 then
-        -- Handle negative numbers (signed interpretation)
-        return string.format("-0x%X", -num)
-    elseif num > 0xFFFFFFFF then
-        -- 64-bit address: use proper formatting
-        local high = math.floor(num / 0x100000000)
-        local low = num % 0x100000000
-        return string.format("0x%X%08X", high, low)
-    else
-        -- 32-bit address
+    if num >= 0 and num <= 0xFFFFFFFF then
         return string.format("0x%08X", num)
+    else
+        return string.format("0x%X", num)
     end
+end
+
+local function toHexLow32(num)
+    if not num then return nil end
+    return num & 0xFFFFFFFF
 end
 
 local function log(msg)
@@ -175,10 +171,15 @@ local function cleanupZombieState()
     serverState.active_watches = {}
     
     if cleaned.breakpoints > 0 or cleaned.dbvm_watches > 0 or cleaned.scans > 0 then
-        log(string.format("Cleaned: %d breakpoints, %d DBVM watches, %d scans", 
+        log(string.format("Cleaned: %d breakpoints, %d DBVM watches, %d scans",
             cleaned.breakpoints, cleaned.dbvm_watches, cleaned.scans))
     end
-    
+
+    -- Extension point (reserved for additive units 7-23):
+    -- If you add new long-lived resources to serverState (persistent scans,
+    -- custom symbols, injected code caves, etc.), register their cleanup here
+    -- so script reload doesn't leak them.
+
     return cleaned
 end
 
@@ -702,9 +703,18 @@ local function cmd_scan_all(params)
     fl.initialize()
     local count = fl.getCount()
     
+    if serverState.scan_foundlist then
+        pcall(function() serverState.scan_foundlist.destroy() end)
+        serverState.scan_foundlist = nil
+    end
+    if serverState.scan_memscan then
+        pcall(function() serverState.scan_memscan.destroy() end)
+        serverState.scan_memscan = nil
+    end
+
     serverState.scan_memscan = ms
     serverState.scan_foundlist = fl
-    
+
     return { success = true, count = count }
 end
 
@@ -1185,6 +1195,21 @@ end
 -- COMMAND HANDLERS - BREAKPOINTS
 -- ============================================================================
 
+-- Clears any hw_bp_slots entry (and its tracking tables) whose address matches
+-- addr, so the slot is available for re-use without leaking the old entry.
+local function clearGhostBpSlot(addr)
+    for i = 1, 4 do
+        if serverState.hw_bp_slots[i] and serverState.hw_bp_slots[i].address == addr then
+            local oldId = serverState.hw_bp_slots[i].id
+            serverState.hw_bp_slots[i] = nil
+            if oldId then
+                serverState.breakpoints[oldId] = nil
+                serverState.breakpoint_hits[oldId] = nil
+            end
+        end
+    end
+end
+
 local function cmd_set_breakpoint(params)
     local addr = params.address
     local bpId = params.id
@@ -1203,6 +1228,8 @@ local function cmd_set_breakpoint(params)
         bpId = bpId .. "_" .. suffix
     end
 
+    clearGhostBpSlot(addr)
+
     -- Find free hardware slot (max 4 debug registers)
     local slot = nil
     for i = 1, 4 do
@@ -1218,7 +1245,7 @@ local function cmd_set_breakpoint(params)
 
     -- Remove existing breakpoint at this address
     pcall(function() debug_removeBreakpoint(addr) end)
-    
+
     serverState.breakpoint_hits[bpId] = {}
     
     -- CRITICAL: Use bpmDebugRegister for hardware breakpoints (anti-cheat safe)
@@ -1265,6 +1292,8 @@ local function cmd_set_data_breakpoint(params)
         while serverState.breakpoints[bpId .. "_" .. suffix] do suffix = suffix + 1 end
         bpId = bpId .. "_" .. suffix
     end
+
+    clearGhostBpSlot(addr)
 
     -- Find free hardware slot (max 4 debug registers)
     local slot = nil
@@ -1386,7 +1415,7 @@ local function cmd_evaluate_lua(params)
     local code = params.code
     if not code then return { success = false, error = "No code provided" } end
     
-    local fn, err = loadstring(code)
+    local fn, err = load(code, "mcp_evaluate_lua", "t")
     if not fn then return { success = false, error = "Compile error: " .. tostring(err) } end
     
     local ok, result = pcall(fn)
@@ -2002,7 +2031,7 @@ end
 -- This is CRITICAL for continuous packet monitoring - logs can be polled repeatedly
 local function cmd_poll_dbvm_watch(params)
     local addr = params.address
-    local clear = params.clear or true  -- Default to clearing logs after poll
+    local clear = (params.clear ~= false)  -- nil→true, false→false, true→true
     local max_results = params.max_results or 1000
     
     if type(addr) == "string" then addr = getAddressSafe(addr) end
@@ -2034,22 +2063,26 @@ local function cmd_poll_dbvm_watch(params)
             local hitData = {
                 hit_number = i,
                 -- 32-bit game uses ESP, 64-bit uses RSP
-                ESP = entry.RSP and (entry.RSP % 0x100000000) or nil,  -- Lower 32 bits for 32-bit game
+                ESP = entry.RSP and toHexLow32(entry.RSP) or nil,
                 RSP = entry.RSP and toHex(entry.RSP) or nil,
-                EIP = entry.RIP and (entry.RIP % 0x100000000) or nil,  -- Lower 32 bits
+                EIP = entry.RIP and toHexLow32(entry.RIP) or nil,
                 RIP = entry.RIP and toHex(entry.RIP) or nil,
                 -- Include key registers that might hold packet buffer
-                EAX = entry.RAX and (entry.RAX % 0x100000000) or nil,
-                ECX = entry.RCX and (entry.RCX % 0x100000000) or nil,
-                EDX = entry.RDX and (entry.RDX % 0x100000000) or nil,
-                EBX = entry.RBX and (entry.RBX % 0x100000000) or nil,
-                ESI = entry.RSI and (entry.RSI % 0x100000000) or nil,
-                EDI = entry.RDI and (entry.RDI % 0x100000000) or nil,
+                EAX = entry.RAX and toHexLow32(entry.RAX) or nil,
+                ECX = entry.RCX and toHexLow32(entry.RCX) or nil,
+                EDX = entry.RDX and toHexLow32(entry.RDX) or nil,
+                EBX = entry.RBX and toHexLow32(entry.RBX) or nil,
+                ESI = entry.RSI and toHexLow32(entry.RSI) or nil,
+                EDI = entry.RDI and toHexLow32(entry.RDI) or nil,
             }
             table.insert(results, hitData)
         end
     end
-    
+
+    if clear then
+        pcall(dbvm_watch_clearlog, watch_id)
+    end
+
     local uptime = os.time() - (watchInfo.start_time or os.time())
     
     return {
