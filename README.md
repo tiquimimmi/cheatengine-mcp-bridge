@@ -10,8 +10,10 @@ Create mods, trainers, security audits, game bots, accelerate RE, or do anything
 
 > [!NOTE]
 > Thanks everyone for the stars, much appreciated! <3
+> 
 > Specially a big thank you to all the contributors!!
-> @libangli218, @lauralex
+> 
+> [@libangli218](https://github.com/libangli218), [@lauralex](https://github.com/lauralex)
 
 ---
 
