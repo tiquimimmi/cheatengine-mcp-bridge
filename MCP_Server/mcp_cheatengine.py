@@ -680,6 +680,87 @@ def ping() -> str:
     """Check connectivity and get version info."""
     return format_result(ce_client.send_command("ping"))
 
+# --- UNIT 15: ADVANCED SCANNING ---
+
+@mcp.tool()
+def aob_scan_unique(pattern: str, protection: str = "+X") -> str:
+    """Scan for an AOB pattern that must match exactly once. Returns {success, address} or error with count.
+    Use this when you expect a signature to be unique in the process."""
+    return format_result(ce_client.send_command("aob_scan_unique", {"pattern": pattern, "protection": protection}))
+
+@mcp.tool()
+def aob_scan_module(pattern: str, module_name: str, protection: str = "+X") -> str:
+    """Scan for an AOB pattern restricted to a specific module's memory range.
+    Returns {success, count, addresses: [str]}."""
+    return format_result(ce_client.send_command("aob_scan_module", {
+        "pattern": pattern,
+        "module_name": module_name,
+        "protection": protection
+    }))
+
+@mcp.tool()
+def aob_scan_module_unique(pattern: str, module_name: str, protection: str = "+X") -> str:
+    """Scan for an AOB pattern in a specific module that must match exactly once.
+    Returns {success, address} or error with count."""
+    return format_result(ce_client.send_command("aob_scan_module_unique", {
+        "pattern": pattern,
+        "module_name": module_name,
+        "protection": protection
+    }))
+
+@mcp.tool()
+def pointer_rescan(value: str, previous_results_file: str = None) -> str:
+    """Re-scan an existing pointer scan for a new value. Requires a prior pointer scan in CE.
+    Returns {success, result_count}. Run a Pointer Scanner scan in CE first."""
+    params = {"value": value}
+    if previous_results_file:
+        params["previous_results_file"] = previous_results_file
+    return format_result(ce_client.send_command("pointer_rescan", params))
+
+@mcp.tool()
+def create_persistent_scan(name: str) -> str:
+    """Create a named, stateful memory scan session. Use the name with persistent_scan_* tools.
+    Returns {success, scan_name}."""
+    return format_result(ce_client.send_command("create_persistent_scan", {"name": name}))
+
+@mcp.tool()
+def persistent_scan_first_scan(name: str, value: str, type: str = "dword", scan_option: str = "exact") -> str:
+    """Run the first scan on a named persistent scan session.
+    Types: byte, word, dword, qword, float, double, string.
+    Scan options: exact, unknown, between, bigger, smaller.
+    Returns {success, scan_name, count}."""
+    return format_result(ce_client.send_command("persistent_scan_first_scan", {
+        "name": name,
+        "value": value,
+        "type": type,
+        "scan_option": scan_option
+    }))
+
+@mcp.tool()
+def persistent_scan_next_scan(name: str, value: str = None, scan_option: str = "exact") -> str:
+    """Narrow down results with a next scan on a named persistent scan session.
+    Scan options: exact, increased, decreased, changed, unchanged, bigger, smaller.
+    Returns {success, scan_name, count}."""
+    params = {"name": name, "scan_option": scan_option}
+    if value is not None:
+        params["value"] = value
+    return format_result(ce_client.send_command("persistent_scan_next_scan", params))
+
+@mcp.tool()
+def persistent_scan_get_results(name: str, offset: int = 0, limit: int = 100) -> str:
+    """Get paginated results from a named persistent scan session.
+    Returns {success, total, offset, limit, results: [{address, value}]}."""
+    return format_result(ce_client.send_command("persistent_scan_get_results", {
+        "name": name,
+        "offset": offset,
+        "limit": limit
+    }))
+
+@mcp.tool()
+def persistent_scan_destroy(name: str) -> str:
+    """Destroy a named persistent scan session and free its memory.
+    Returns {success, scan_name, destroyed}."""
+    return format_result(ce_client.send_command("persistent_scan_destroy", {"name": name}))
 # --- MEMORY OPERATIONS (Unit 14) ---
 
 @mcp.tool()
