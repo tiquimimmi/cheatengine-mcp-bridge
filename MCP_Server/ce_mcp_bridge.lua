@@ -5799,65 +5799,60 @@ end
 -- ============================================================================
 -- FIFO TRANSPORT (macOS fallback when LuaSocket unavailable)
 -- Uses POSIX named pipes via io.open. Requires tcp_fifo_proxy.py running.
--- Known limitation: GUI freezes during command execution (runs on main thread).
+-- Worker thread handles blocking FIFO I/O; commands synchronize to main thread.
 -- ============================================================================
 
-local function startFIFOServer()
+local function FIFOWorker(thread)
     log(string.format("[MCP v%s] MCP Server using FIFO transport", VERSION))
     log("[MCP] Request FIFO:  " .. serverState.fifoRequest)
     log("[MCP] Response FIFO: " .. serverState.fifoResponse)
     log("[MCP] Ensure tcp_fifo_proxy.py is running!")
 
-    local pollTimer = createTimer(nil)
-    pollTimer.Interval = 50  -- 50ms polling
-
-    pollTimer.OnTimer = function()
-        -- Try to open request FIFO (non-blocking attempt)
+    while not thread.Terminated do
+        -- Blocking open — waits until the proxy opens the other end.
+        -- Runs on the worker thread so the CE GUI stays responsive.
         local reqFile = io.open(serverState.fifoRequest, "rb")
-        if not reqFile then return end
-
-        -- Read 4-byte header
-        local header = reqFile:read(4)
-        if not header or #header < 4 then
-            reqFile:close()
-            return
+        if not reqFile then
+            if not thread.Terminated then sleep(100) end
+            goto continue
         end
-
-        local b1, b2, b3, b4 = string.byte(header, 1, 4)
-        local len = b1 + (b2 * 256) + (b3 * 65536) + (b4 * 16777216)
-        if len <= 0 or len >= 32 * 1024 * 1024 then
-            reqFile:close()
-            return
-        end
-
-        -- Read payload
-        local payload = reqFile:read(len)
-        reqFile:close()
-        if not payload or #payload < len then return end
-
-        -- Process command (runs on main thread, GUI freezes here)
-        serverState.connected = true
-        local response = executeCommand(payload)
-
-        -- Write response to response FIFO
-        local respLen = #response
-        local respHeader = string.char(
-            respLen % 256,
-            math.floor(respLen / 256) % 256,
-            math.floor(respLen / 65536) % 256,
-            math.floor(respLen / 16777216) % 256
-        )
 
         local respFile = io.open(serverState.fifoResponse, "wb")
-        if respFile then
-            respFile:write(respHeader .. response)
-            respFile:flush()
-            respFile:close()
+        if not respFile then
+            reqFile:close()
+            if not thread.Terminated then sleep(100) end
+            goto continue
         end
+
+        log("[MCP] FIFO connected")
+        serverState.connected = true
+
+        local function readFn(n)
+            local data = reqFile:read(n)
+            if not data then return nil end
+            return data
+        end
+
+        local function writeFn(data)
+            respFile:write(data)
+            respFile:flush()
+        end
+
+        local function isConnectedFn()
+            return not thread.Terminated
+        end
+
+        processRequestLoop(thread, readFn, writeFn, isConnectedFn)
+
+        pcall(function() reqFile:close() end)
+        pcall(function() respFile:close() end)
+        serverState.connected = false
+        log("[MCP] FIFO disconnected")
+
+        ::continue::
     end
 
-    pollTimer.Enabled = true
-    serverState.pollTimer = pollTimer
+    log("[MCP] FIFO Worker Terminated")
 end
 
 
@@ -5884,7 +5879,7 @@ function StartMCPBridge()
             startPollingTCPServer()
         end
     elseif transport == "fifo" then
-        startFIFOServer()
+        serverState.workerThread = createThread(FIFOWorker)
     end
 end
 
