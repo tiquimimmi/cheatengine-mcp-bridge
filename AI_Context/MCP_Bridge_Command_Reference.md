@@ -112,7 +112,8 @@ local TCP_PORT = 28015
 
 **Purpose:** Get information about the currently attached process.
 
-**Parameters:** None
+**Parameters:**
+- `refresh_symbols` (bool, optional, default `false`): Force CE to re-enumerate all symbols. **Slow on large binaries** — only use when symbols are stale or after attaching to a new process.
 
 **Returns:** JSON with:
 - `success` (bool)
@@ -125,6 +126,11 @@ local TCP_PORT = 28015
 **Example request:**
 ```json
 {"method": "get_process_info", "params": {}}
+```
+
+**Example request (with symbol refresh):**
+```json
+{"method": "get_process_info", "params": {"refresh_symbols": true}}
 ```
 
 **Example response:**

@@ -506,9 +506,11 @@ local function aobScanPEModules(maxCount)
 end
 
 function commandHandlers.get_process_info(params)
-    -- FORCE REFRESH: Tell CE to try and reload symbols using current DBVM rights
-    pcall(reinitializeSymbolhandler)
-    
+    -- Only reinitialize symbols when explicitly requested (it's very slow on large binaries)
+    if params and params.refresh_symbols then
+        pcall(reinitializeSymbolhandler)
+    end
+
     local pid = getOpenedProcessID()
     if pid and pid > 0 then
         -- Get modules using the same logic as enum_modules (with AOB fallback)

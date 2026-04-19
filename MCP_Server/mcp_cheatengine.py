@@ -474,9 +474,13 @@ mcp = FastMCP(MCP_SERVER_NAME)
 # --- PROCESS & MODULES ---
 
 @mcp.tool()
-def get_process_info() -> str:
-    """Get current process ID, name, modules count and architecture."""
-    return format_result(ce_client.send_command("get_process_info"))
+def get_process_info(refresh_symbols: bool = False) -> str:
+    """Get current process ID, name, modules count and architecture.
+
+    Args:
+        refresh_symbols: Force CE to re-enumerate symbols (slow on large binaries, default False).
+    """
+    return format_result(ce_client.send_command("get_process_info", {"refresh_symbols": refresh_symbols}))
 
 @mcp.tool()
 def enum_modules(offset: int = 0, limit: int = 100) -> str:
