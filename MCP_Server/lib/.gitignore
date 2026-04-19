@@ -1,0 +1,4 @@
+# LuaSocket binaries (platform-specific, not committed)
+*.so
+*.dll
+*.dylib

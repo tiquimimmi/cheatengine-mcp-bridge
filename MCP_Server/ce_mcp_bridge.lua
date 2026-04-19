@@ -2,8 +2,14 @@
 -- CHEATENGINE MCP BRIDGE v12.0.0
 -- ============================================================================
 
-local PIPE_NAME = "CE_MCP_Bridge_v99"
+local WIRE_PROTOCOL_VERSION = 99
+local PIPE_NAME = "CE_MCP_Bridge_v" .. WIRE_PROTOCOL_VERSION
 local VERSION = "12.0.0"
+
+-- Transport configuration
+local TRANSPORT_MODE = "auto"   -- "pipe" | "tcp" | "auto"
+local TCP_HOST = "127.0.0.1"   -- bind address (change to "0.0.0.0" for LAN)
+local TCP_PORT = 28015           -- TCP listen port
 
 -- Global State
 local serverState = {
@@ -11,6 +17,7 @@ local serverState = {
     timer = nil,
     pipe = nil,
     connected = false,
+    transportMode = nil,
     scan_memscan = nil,
     scan_foundlist = nil,
     breakpoints = {},
@@ -1702,6 +1709,8 @@ local function cmd_ping(params)
     return {
         success = true,
         version = VERSION,
+        protocol_version = WIRE_PROTOCOL_VERSION,
+        transport = serverState.transportMode or "pipe",
         timestamp = os.time(),
         process_id = getOpenedProcessID() or 0,
         message = "CE MCP Bridge v" .. VERSION .. " alive"
@@ -5597,106 +5606,359 @@ local function executeCommand(jsonRequest)
 end
 
 -- ============================================================================
+-- TCP SOCKET LIBRARY LOADING
+-- ============================================================================
+
+local function getScriptDirectory()
+    -- Primary: use CE API (works when script loaded via File > Execute Script)
+    local ok1, cePath = pcall(function()
+        return extractDir(getMainForm().getAutoAttachList().getScript())
+    end)
+    if ok1 and cePath and #cePath > 0 then
+        return cePath:gsub("\\", "/")
+    end
+
+    -- Fallback: Lua debug library (works for file-loaded scripts)
+    local ok2, info = pcall(debug.getinfo, 1, "S")
+    if ok2 and info and type(info.source) == "string" and string.sub(info.source, 1, 1) == "@" then
+        local p = string.sub(info.source, 2)
+        p = p:gsub("\\", "/")
+        p = p:gsub("/[^/]+$", "")
+        return p
+    end
+
+    return nil
+end
+
+local function setupSocketPaths()
+    local scriptPath = getScriptDirectory()
+    if scriptPath then
+        package.path = scriptPath .. "/lib/?.lua;" ..
+                       scriptPath .. "/lib/?/init.lua;" ..
+                       package.path
+        package.cpath = scriptPath .. "/lib/?.so;" ..
+                        scriptPath .. "/lib/?.dll;" ..
+                        scriptPath .. "/lib/?/core.so;" ..
+                        scriptPath .. "/lib/?/core.dll;" ..
+                        package.cpath
+    else
+        log("[MCP] WARNING: Could not determine script directory for LuaSocket path setup")
+    end
+end
+setupSocketPaths()
+
+local _socketLib = nil
+local function loadSocketLib()
+    if _socketLib then return _socketLib end
+
+    local ok, sock = pcall(require, "socket")
+    if ok and sock and type(sock.bind) == "function" then
+        _socketLib = sock
+        return sock
+    end
+
+    local okCore, sockCore = pcall(require, "socket.core")
+    if okCore and sockCore and type(sockCore.bind) == "function" then
+        _socketLib = sockCore
+        return sockCore
+    end
+
+    return nil
+end
+
+local function detectTransport()
+    if TRANSPORT_MODE == "pipe" then
+        if type(createPipe) ~= "function" then
+            log("[MCP] ERROR: Pipe transport requested but createPipe is not available on this platform.")
+            return nil
+        end
+        return "pipe"
+    end
+
+    if TRANSPORT_MODE == "tcp" then
+        if not loadSocketLib() then
+            log("[MCP] ERROR: TCP transport requested but LuaSocket not found.")
+            log("[MCP] Ensure socket/core.so or socket/core.dll is available under MCP_Server/lib/.")
+            return nil
+        end
+        return "tcp"
+    end
+
+    -- auto: prefer pipe if available, else tcp
+    if type(createPipe) == "function" then return "pipe" end
+    if loadSocketLib() then return "tcp" end
+
+    log("[MCP] ERROR: No transport available (no createPipe, no socket library).")
+    return nil
+end
+
+-- ============================================================================
+-- SHARED REQUEST LOOP (used by both PipeWorker and TCPWorker)
+-- ============================================================================
+
+local function processRequestLoop(thread, readFn, writeFn, isConnectedFn)
+    while not thread.Terminated and isConnectedFn() do
+        local ok, headerStr = pcall(readFn, 4)
+        if not ok or not headerStr or #headerStr < 4 then break end
+
+        local b1, b2, b3, b4 = string.byte(headerStr, 1, 4)
+        local len = b1 + (b2 * 256) + (b3 * 65536) + (b4 * 16777216)
+        if len <= 0 or len >= 32 * 1024 * 1024 then break end
+
+        local ok2, payload = pcall(readFn, len)
+        if not ok2 or not payload then break end
+
+        local response
+        thread.synchronize(function()
+            response = executeCommand(payload)
+        end)
+
+        local respLen = #response
+        local header = string.char(
+            respLen % 256,
+            math.floor(respLen / 256) % 256,
+            math.floor(respLen / 65536) % 256,
+            math.floor(respLen / 16777216) % 256
+        )
+
+        local ok3 = pcall(writeFn, header .. response)
+        if not ok3 then break end
+    end
+end
+
+-- ============================================================================
 -- THREAD-BASED PIPE SERVER (NON-BLOCKING GUI)
 -- ============================================================================
--- Replaces v10 Timer architecture to prevent GUI Freezes.
--- I/O happens in Worker Thread. Execution happens in Main Thread.
 
 local function PipeWorker(thread)
     log("Worker Thread Started - Waiting for connection...")
-    
+
     while not thread.Terminated do
-        -- Create Pipe Instance per connection attempt
-        -- Increased buffer size to 256KB for better throughput
-        local pipe = createPipe(PIPE_NAME, 262144, 262144)  -- 256 KB buffers (was 64 KB)
+        local pipe = createPipe(PIPE_NAME, 262144, 262144)
         if not pipe then
             log("Fatal: Failed to create pipe")
             return
         end
-        
-        -- Store reference so we can destroy it from main thread (stopServer) to break blocking calls
+
         serverState.workerPipe = pipe
-        
-        -- timeout for blocking operations (connect/read)
-        -- We DO NOT set pipe.Timeout because it auto-disconnects on timeout.
-        -- We rely on blocking reads and pipe.destroy() from stopServer to break the block.
-        -- pipe.Timeout = 0 (Default, Infinite)
-        
-        -- Wait for client (Blocking, but in thread so GUI is fine)
-        -- LuaPipeServer uses acceptConnection().
-        -- note: acceptConnection might not return a boolean, so we check pipe.Connected afterwards.
-        
-        -- log("Thread: Calling acceptConnection()...")
+
         pcall(function()
             pipe.acceptConnection()
         end)
-        
+
         if pipe.Connected and not thread.Terminated then
             log("Client Connected")
             serverState.connected = true
-            
-            while not thread.Terminated and pipe.Connected do
-                -- Try to read header (4 bytes)
-                -- We use pcall to handle timeouts/errors gracefully
-                local ok, lenBytes = pcall(function() return pipe.readBytes(4) end)
-                
-                if ok and lenBytes and #lenBytes == 4 then
-                    local len = lenBytes[1] + (lenBytes[2] * 256) + (lenBytes[3] * 65536) + (lenBytes[4] * 16777216)
-                    
-                    -- Sanity check length
-                    if len > 0 and len < 32 * 1024 * 1024 then
-                        local payload = pipe.readString(len)
-                        
-                        if payload then
-                            -- CRITICAL: EXECUTE ON MAIN THREAD
-                            -- We pause the worker and run logic on GUI thread to be safe
-                            local response = nil
-                            thread.synchronize(function()
-                                response = executeCommand(payload)
-                            end)
-                            
-                            -- Write response back (Worker Thread)
-                            if response then
-                                local rLen = #response
-                                local b1 = rLen % 256
-                                local b2 = math.floor(rLen / 256) % 256
-                                local b3 = math.floor(rLen / 65536) % 256
-                                local b4 = math.floor(rLen / 16777216) % 256
-                                
-                                pipe.writeBytes({b1, b2, b3, b4})
-                                pipe.writeString(response)
-                            end
-                        else
-                             -- log("Thread: Read payload failed (nil)")
-                        end
-                    end
-                else
-                    -- Read failed. If pipe disconnected, the loop will terminate on next check.
-                    if not pipe.Connected then
-                        -- Client disconnected gracefully
+
+            local unpackBytes = table.unpack or unpack
+
+            local function readFn(n)
+                if n <= 4 then
+                    local bytes = pipe.readBytes(n)
+                    if not bytes then return nil end
+                    return string.char(unpackBytes(bytes))
+                end
+                return pipe.readString(n)
+            end
+
+            local function writeFn(data)
+                local headerBytes = {string.byte(data, 1, 4)}
+                pipe.writeBytes(headerBytes)
+                if #data > 4 then
+                    pipe.writeString(string.sub(data, 5))
+                end
+            end
+
+            local function isConnectedFn()
+                return pipe.Connected
+            end
+
+            processRequestLoop(thread, readFn, writeFn, isConnectedFn)
+
+            serverState.connected = false
+            log("Client Disconnected")
+        end
+
+        serverState.workerPipe = nil
+        pcall(function()
+            if pipe then pipe.destroy() end
+        end)
+
+        if not thread.Terminated then
+            sleep(50)
+        end
+    end
+
+    log("Worker Thread Terminated")
+end
+
+-- ============================================================================
+-- TCP SOCKET SERVER (THREAD-BASED)
+-- ============================================================================
+
+local function TCPWorker(thread)
+    local socketLib = loadSocketLib()
+    local server, err = socketLib.bind(TCP_HOST, TCP_PORT)
+    if not server then
+        log("[MCP] ERROR: Failed to bind TCP server: " .. (err or "unknown"))
+        return
+    end
+
+    server:settimeout(1)
+    serverState.tcpServer = server
+    log(string.format("[MCP v%s] MCP Server Listening on: tcp://%s:%d", VERSION, TCP_HOST, TCP_PORT))
+
+    while not thread.Terminated do
+        local client = server:accept()
+        if client then
+            client:settimeout(30)
+            pcall(function() client:setoption("keepalive", true) end)
+            serverState.tcpClient = client
+            log("TCP Client Connected")
+            serverState.connected = true
+
+            local function readFn(n)
+                local data = client:receive(n)
+                if not data then return nil end
+                return data
+            end
+
+            local function writeFn(data)
+                local total = #data
+                local sent = 0
+                while sent < total do
+                    local i, sendErr, partialIdx = client:send(data, sent + 1)
+                    if i then
+                        sent = i
+                    elseif partialIdx then
+                        sent = partialIdx
+                    else
+                        error("TCP send failed: " .. (sendErr or "unknown"))
                     end
                 end
             end
-            
+
+            local function isConnectedFn()
+                return client ~= nil and not thread.Terminated
+            end
+
+            processRequestLoop(thread, readFn, writeFn, isConnectedFn)
+
+            pcall(function() client:close() end)
+            serverState.tcpClient = nil
             serverState.connected = false
-            log("Client Disconnected")
-        else
-            -- Debug: acceptConnection returned but pipe not valid
-            -- This usually happens on termination or weird state
-            if not thread.Terminated then
-                -- log("Thread: Helper log - connection attempt invalid")
+            log("TCP Client Disconnected")
+        end
+    end
+
+    pcall(function() server:close() end)
+    serverState.tcpServer = nil
+end
+
+-- ============================================================================
+-- TCP POLLING FALLBACK (no createThread available)
+-- Known limitation: GUI freezes during command execution
+-- ============================================================================
+
+local function startPollingTCPServer()
+    local socketLib = loadSocketLib()
+    local server, err = socketLib.bind(TCP_HOST, TCP_PORT)
+    if not server then
+        log("[MCP] ERROR: Failed to bind TCP server: " .. (err or "unknown"))
+        return
+    end
+
+    server:settimeout(0)
+    serverState.tcpServer = server
+    log(string.format("[MCP v%s] MCP Server Listening on: tcp://%s:%d (polling)", VERSION, TCP_HOST, TCP_PORT))
+
+    local client = nil
+    local headerBuf = ""
+    local pollTimer = createTimer(nil)
+    pollTimer.Interval = 50
+
+    pollTimer.OnTimer = function()
+        if not client then
+            client = server:accept()
+            if client then
+                client:settimeout(0)
+                headerBuf = ""
+                serverState.tcpClient = client
+                serverState.connected = true
+                log("TCP Client Connected (polling)")
+            end
+            return
+        end
+
+        if #headerBuf < 4 then
+            local chunk, readErr, partial = client:receive(4 - #headerBuf)
+            if chunk then
+                headerBuf = headerBuf .. chunk
+            elseif partial and #partial > 0 then
+                headerBuf = headerBuf .. partial
+            elseif readErr == "closed" then
+                pcall(function() client:close() end)
+                client = nil
+                headerBuf = ""
+                serverState.tcpClient = nil
+                serverState.connected = false
+                log("TCP Client Disconnected (polling)")
+                return
+            end
+            if #headerBuf < 4 then return end
+        end
+
+        client:settimeout(30)
+        local b1, b2, b3, b4 = string.byte(headerBuf, 1, 4)
+        local len = b1 + (b2 * 256) + (b3 * 65536) + (b4 * 16777216)
+        headerBuf = ""
+
+        if len <= 0 or len >= 32 * 1024 * 1024 then
+            pcall(function() client:close() end)
+            client = nil
+            serverState.tcpClient = nil
+            serverState.connected = false
+            return
+        end
+
+        local payload = client:receive(len)
+        if not payload then
+            pcall(function() client:close() end)
+            client = nil
+            serverState.tcpClient = nil
+            serverState.connected = false
+            return
+        end
+
+        local response = executeCommand(payload)
+        local respLen = #response
+        local hdr = string.char(
+            respLen % 256,
+            math.floor(respLen / 256) % 256,
+            math.floor(respLen / 65536) % 256,
+            math.floor(respLen / 16777216) % 256
+        )
+        local fullMsg = hdr .. response
+        local sent = 0
+        while sent < #fullMsg do
+            local i, sendErr, partialIdx = client:send(fullMsg, sent + 1)
+            if i then
+                sent = i
+            elseif partialIdx then
+                sent = partialIdx
+            else
+                pcall(function() client:close() end)
+                client = nil
+                serverState.tcpClient = nil
+                serverState.connected = false
+                return
             end
         end
-        
-        -- Clean up pipe
-        serverState.workerPipe = nil
-        pcall(function() pipe.destroy() end)
-        
-        -- Brief sleep before recreating pipe to accept new connection
-        if not thread.Terminated then sleep(50) end
+        client:settimeout(0)
     end
-    
-    log("Worker Thread Terminated")
+
+    pollTimer.Enabled = true
+    serverState.pollTimer = pollTimer
 end
 
 -- ============================================================================
@@ -5704,48 +5966,71 @@ end
 -- ============================================================================
 
 function StopMCPBridge()
-    if serverState.workerThread then
-        log("Stopping Server (Terminating Thread)...")
-        serverState.workerThread.terminate()
-        
-        -- Force destroy the pipe if it's currently blocking on acceptConnection or read
-        if serverState.workerPipe then
-            pcall(function() serverState.workerPipe.destroy() end)
-            serverState.workerPipe = nil
-        end
-        
-        serverState.workerThread = nil
-        serverState.running = false
+    serverState.running = false
+
+    if serverState.workerPipe then
+        pcall(function() serverState.workerPipe.destroy() end)
+        serverState.workerPipe = nil
     end
-    
+
+    if serverState.tcpClient then
+        pcall(function() serverState.tcpClient:close() end)
+        serverState.tcpClient = nil
+    end
+
+    if serverState.tcpServer then
+        pcall(function() serverState.tcpServer:close() end)
+        serverState.tcpServer = nil
+    end
+
+    if serverState.pollTimer then
+        serverState.pollTimer.Enabled = false
+        pcall(function() serverState.pollTimer.destroy() end)
+        serverState.pollTimer = nil
+    end
+
+    if serverState.workerThread then
+        serverState.workerThread.terminate()
+        -- pcall guards against deadlock if thread is inside synchronize()
+        pcall(function() serverState.workerThread.waitfor() end)
+        pcall(function() serverState.workerThread.destroy() end)
+        serverState.workerThread = nil
+    end
+
     if serverState.timer then
         serverState.timer.destroy()
         serverState.timer = nil
     end
-    
-    -- CRITICAL: Cleanup all zombie resources (breakpoints, DBVM watches, scans)
+
+    serverState.connected = false
+    serverState.running = false
+    serverState.transportMode = nil
+
     cleanupZombieState()
-    
     log("Server Stopped")
 end
 
 function StartMCPBridge()
-    StopMCPBridge()  -- This now also calls cleanupZombieState()
-    
-    -- Update Global State
-    log("Starting MCP Bridge v" .. VERSION)
-    
+    StopMCPBridge()
+
+    local transport = detectTransport()
+    if not transport then
+        log("[MCP] Bridge not started: no transport available.")
+        return
+    end
+
+    serverState.transportMode = transport
     serverState.running = true
     serverState.connected = false
-    
-    -- Create the Worker Thread
-    serverState.workerThread = createThread(PipeWorker)
-    
-    log("===========================================")
-    log("MCP Server Listening on: " .. PIPE_NAME)
-    log("Architecture: Threaded I/O + Synchronized Execution")
-    log("Cleanup: Zombie Prevention Active")
-    log("===========================================")
+
+    if transport == "pipe" then
+        log(string.format("[MCP v%s] MCP Server Listening on: %s", VERSION, PIPE_NAME))
+        serverState.workerThread = createThread(PipeWorker)
+    elseif type(createThread) == "function" then
+        serverState.workerThread = createThread(TCPWorker)
+    else
+        startPollingTCPServer()
+    end
 end
 
 -- Auto-start

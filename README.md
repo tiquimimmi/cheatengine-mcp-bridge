@@ -64,11 +64,11 @@ flowchart TD
     
     MCP[mcp_cheatengine.py - Python MCP Server]
     
-    MCP <-->|Named Pipe - Async| PIPE
+    MCP <-->|Named Pipe / TCP| TRANSPORT
     
-    PIPE["\\.\\pipe\\CE_MCP_Bridge_v99"]
+    TRANSPORT["\\.\\pipe\\CE_MCP_Bridge_v99\nor tcp://HOST:28015"]
     
-    PIPE <--> CE
+    TRANSPORT <--> CE
     
     subgraph CE[Cheat Engine - DBVM Mode]
         subgraph LUA[ce_mcp_bridge.lua]
@@ -89,11 +89,13 @@ pip install -r MCP_Server/requirements.txt
 ```
 Or manually:
 ```bash
-pip install mcp pywin32
+pip install mcp
+pip install pywin32  # Windows only
 ```
 
 > [!NOTE]
-> **Windows only** - Uses Named Pipes (`pywin32`)
+> - **Windows:** `pip install -r MCP_Server/requirements.txt` (includes `pywin32`)
+> - **macOS/Linux:** `pip install -r MCP_Server/requirements.txt` (`pywin32` is skipped automatically)
 
 ---
 
@@ -123,7 +125,7 @@ Restart the IDE to load the MCP server config.
 ### 3. Verify Connection
 Use the `ping` tool to verify connectivity:
 ```json
-{"success": true, "version": "12.0.0", "message": "CE MCP Bridge Active"}
+{"success": true, "version": "12.0.0", "protocol_version": 99, "transport": "pipe", "message": "CE MCP Bridge v12.0.0 alive"}
 ```
 
 ### 4. Start Asking Questions
@@ -132,6 +134,39 @@ Use the `ping` tool to verify connectivity:
 "Read 16 bytes at the base address"
 "Disassemble the entry point"
 ```
+
+### Cross-Platform / LAN Setup
+
+The bridge supports TCP socket transport for connecting over a network or running on non-Windows Cheat Engine builds.
+
+#### LAN Setup (Windows CE → Remote MCP Server)
+
+1. In `MCP_Server/ce_mcp_bridge.lua`, set:
+   ```lua
+   local TRANSPORT_MODE = "tcp"
+   local TCP_HOST = "0.0.0.0"  -- accept connections from any interface
+   local TCP_PORT = 28015
+   ```
+2. Load the Lua script in CE as usual.
+3. On the MCP server machine, set:
+   ```bash
+   CE_MCP_URI=tcp:192.168.x.x:28015
+   ```
+   Replace the IP with the Cheat Engine machine's LAN address.
+
+#### macOS CE Setup
+
+1. Ensure LuaSocket is available (see `MCP_Server/lib/README.md`).
+2. The bridge auto-detects TCP transport when `createPipe` is unavailable.
+3. On the MCP server machine, set `CE_MCP_URI=tcp:MAC_IP:28015`.
+
+#### Transport Configuration
+
+| Env Var | Values | Default |
+|---------|--------|---------|
+| `CE_MCP_URI` | `pipe`, `tcp:HOST:PORT`, `tcp::PORT`, `tcp:HOST` | `pipe` (Windows), `tcp::28015` (other) |
+
+**Security:** TCP transport has no authentication. Only use it on trusted networks. `TCP_HOST` defaults to `127.0.0.1` (localhost); set it to `0.0.0.0` explicitly for LAN access.
 
 ---
 

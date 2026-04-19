@@ -170,3 +170,46 @@ Total: 36/37 PASSED (100% success rate)
 ```
 
 Run the test suite with: `python test_mcp.py`
+
+---
+
+## 7. Cross-Platform / LAN Transport
+
+### Architecture
+
+The bridge now supports dual transport: Named Pipes (Windows local) and TCP sockets (LAN / cross-platform).
+
+```
+Mac/Linux                                     Windows
+┌─────────────────┐                           ┌─────────────────┐
+│ AI Client       │                           │ Cheat Engine     │
+│ mcp_cheatengine │── TCP ──────────────────▶ │ ce_mcp_bridge    │
+│ (TCPBridgeClient)│    tcp:192.168.x.x:28015 │ (TCPWorker)      │
+└─────────────────┘                           └─────────────────┘
+```
+
+### Transport Selection
+
+**Lua side** (`ce_mcp_bridge.lua`):
+- `TRANSPORT_MODE = "auto"` (default): pipe if `createPipe` exists, else TCP
+- `TRANSPORT_MODE = "pipe"`: force Named Pipe
+- `TRANSPORT_MODE = "tcp"`: force TCP socket
+
+**Python side** (`mcp_cheatengine.py`):
+- `CE_MCP_URI` env var: `pipe` | `tcp:HOST:PORT`
+
+### Wire Protocol
+
+Both transports use identical framing:
+
+`[4-byte LE uint32 length][UTF-8 JSON-RPC body]`
+
+### TCP Version Handshake
+
+TCP connections perform a `ping` handshake to verify `protocol_version` matches. A mismatch is a hard failure. This replaces the implicit version gate provided by the pipe name suffix (`CE_MCP_Bridge_v99`) when using sockets.
+
+### Known Limitations
+
+- IPv4 only, no TLS, no authentication
+- Single client at a time
+- Polling mode (no `createThread`) freezes the GUI while commands execute

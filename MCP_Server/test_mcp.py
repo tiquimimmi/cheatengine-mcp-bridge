@@ -13,16 +13,29 @@ Enhanced test suite with:
 This test suite is designed to give 100% confidence in MCP bridge reliability.
 """
 
-import win32file
+import os
 import struct
 import json
 import time
 import sys
+import socket as socket_module
 from typing import Optional, Dict, Any, Tuple, List, Callable
 
-PIPE_NAME = r"\\.\pipe\CE_MCP_Bridge_v99"
+try:
+    import win32file
+
+    _HAS_WIN32 = True
+except ImportError:
+    _HAS_WIN32 = False
+
+try:
+    from transport_config import DEFAULT_TCP_PORT, PIPE_NAME, WIRE_PROTOCOL_VERSION, parse_bridge_uri
+except ImportError:
+    from MCP_Server.transport_config import DEFAULT_TCP_PORT, PIPE_NAME, WIRE_PROTOCOL_VERSION, parse_bridge_uri
+
 MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 EXPECTED_VERSION_PREFIX = "12."
+TEST_TRANSPORT, TEST_HOST, TEST_PORT = parse_bridge_uri(os.environ.get("CE_MCP_URI", ""), _HAS_WIN32)
 
 class TestResult:
     PASSED = "PASSED"
@@ -31,27 +44,63 @@ class TestResult:
 
 class MCPTestClient:
     def __init__(self):
-        self.handle = None
+        self.handle = None  # pipe handle
+        self.sock = None    # tcp socket
+        self.transport = TEST_TRANSPORT
         self.request_id = 0
         
     def connect(self) -> bool:
         try:
-            self.handle = win32file.CreateFile(
-                PIPE_NAME,
-                win32file.GENERIC_READ | win32file.GENERIC_WRITE,
-                0, None,
-                win32file.OPEN_EXISTING,
-                0, None
-            )
-            print(f"✓ Connected to {PIPE_NAME}")
+            if self.transport == "pipe":
+                if not _HAS_WIN32:
+                    print("✗ Pipe transport requires Windows + pywin32")
+                    return False
+
+                self.handle = win32file.CreateFile(
+                    PIPE_NAME,
+                    win32file.GENERIC_READ | win32file.GENERIC_WRITE,
+                    0,
+                    None,
+                    win32file.OPEN_EXISTING,
+                    0,
+                    None,
+                )
+                print(f"✓ Connected to {PIPE_NAME}")
+            else:
+                self.sock = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_STREAM)
+                self.sock.settimeout(10)
+                self.sock.connect((TEST_HOST, TEST_PORT))
+                self.sock.settimeout(30)
+                print(f"✓ Connected to tcp://{TEST_HOST}:{TEST_PORT}")
             return True
         except Exception as e:
             print(f"✗ Connection failed: {e}")
             return False
+
+    def _read_bytes(self, n: int) -> bytes:
+        if self.transport == "pipe":
+            _, data = win32file.ReadFile(self.handle, n)
+            return bytes(data)
+
+        data = b""
+        while len(data) < n:
+            chunk = self.sock.recv(n - len(data))
+            if not chunk:
+                raise RuntimeError("TCP connection closed")
+            data += chunk
+        return data
+
+    def _write_bytes(self, data: bytes):
+        if self.transport == "pipe":
+            win32file.WriteFile(self.handle, data)
+        else:
+            self.sock.sendall(data)
     
     def send_command(self, method: str, params: Optional[dict] = None) -> dict:
-        if not self.handle:
-            raise RuntimeError("Not connected to MCP bridge")
+        if self.transport == "pipe" and not self.handle:
+            raise RuntimeError("Not connected (pipe)")
+        if self.transport == "tcp" and not self.sock:
+            raise RuntimeError("Not connected (tcp)")
 
         if params is None:
             params = {}
@@ -66,10 +115,10 @@ class MCPTestClient:
         
         data = json.dumps(request).encode('utf-8')
         header = struct.pack('<I', len(data))
-        win32file.WriteFile(self.handle, header)
-        win32file.WriteFile(self.handle, data)
+        self._write_bytes(header)
+        self._write_bytes(data)
         
-        _, resp_header = win32file.ReadFile(self.handle, 4)
+        resp_header = self._read_bytes(4)
         if len(resp_header) < 4:
             raise RuntimeError("Incomplete response header from bridge")
 
@@ -77,7 +126,7 @@ class MCPTestClient:
         if resp_len <= 0 or resp_len > MAX_RESPONSE_BYTES:
             raise RuntimeError(f"Invalid response length: {resp_len}")
 
-        _, resp_data = win32file.ReadFile(self.handle, resp_len)
+        resp_data = self._read_bytes(resp_len)
         if len(resp_data) < resp_len:
             raise RuntimeError(f"Incomplete response body: expected {resp_len}, got {len(resp_data)}")
 
@@ -90,6 +139,9 @@ class MCPTestClient:
         if self.handle:
             win32file.CloseHandle(self.handle)
             self.handle = None
+        if self.sock:
+            self.sock.close()
+            self.sock = None
 
 
 # ============================================================================
@@ -350,6 +402,10 @@ def main():
             field_equals("success", True),
             has_field("version", str),
             version_check(EXPECTED_VERSION_PREFIX),
+            has_field("protocol_version", int),
+            field_equals("protocol_version", WIRE_PROTOCOL_VERSION),
+            has_field("transport", str),
+            field_equals("transport", TEST_TRANSPORT),
             has_field("message", str),
             has_field("timestamp", int),
         ]
