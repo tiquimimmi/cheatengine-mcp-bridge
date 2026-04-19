@@ -7,9 +7,12 @@ local PIPE_NAME = "CE_MCP_Bridge_v" .. WIRE_PROTOCOL_VERSION
 local VERSION = "12.0.0"
 
 -- Transport configuration
-local TRANSPORT_MODE = "auto"   -- "pipe" | "tcp" | "auto"
+local TRANSPORT_MODE = "auto"   -- "pipe" | "tcp" | "fifo" | "auto"
 local TCP_HOST = "127.0.0.1"   -- bind address (change to "0.0.0.0" for LAN)
 local TCP_PORT = 28015           -- TCP listen port
+-- FIFO paths (macOS fallback when LuaSocket unavailable)
+local FIFO_REQUEST  = "/tmp/ce_mcp_request"
+local FIFO_RESPONSE = "/tmp/ce_mcp_response"
 
 -- Global State
 local serverState = {
@@ -5684,11 +5687,17 @@ local function detectTransport()
         return "tcp"
     end
 
-    -- auto: prefer pipe if available, else tcp
+    if TRANSPORT_MODE == "fifo" then
+        return "fifo"
+    end
+
+    -- auto: prefer pipe if available, else tcp, else fifo
     if type(createPipe) == "function" then return "pipe" end
     if loadSocketLib() then return "tcp" end
+    -- fifo fallback: works on any POSIX system with io.open
+    if io and io.open then return "fifo" end
 
-    log("[MCP] ERROR: No transport available (no createPipe, no socket library).")
+    log("[MCP] ERROR: No transport available (no createPipe, no socket library, no FIFO support).")
     return nil
 end
 
@@ -6010,6 +6019,71 @@ function StopMCPBridge()
     log("Server Stopped")
 end
 
+-- ============================================================================
+-- FIFO TRANSPORT (macOS fallback when LuaSocket unavailable)
+-- Uses POSIX named pipes via io.open. Requires tcp_fifo_proxy.py running.
+-- Known limitation: GUI freezes during command execution (runs on main thread).
+-- ============================================================================
+
+local function startFIFOServer()
+    log(string.format("[MCP v%s] MCP Server using FIFO transport", VERSION))
+    log("[MCP] Request FIFO:  " .. FIFO_REQUEST)
+    log("[MCP] Response FIFO: " .. FIFO_RESPONSE)
+    log("[MCP] Ensure tcp_fifo_proxy.py is running!")
+
+    local pollTimer = createTimer(nil)
+    pollTimer.Interval = 50  -- 50ms polling
+
+    pollTimer.OnTimer = function()
+        -- Try to open request FIFO (non-blocking attempt)
+        local reqFile = io.open(FIFO_REQUEST, "rb")
+        if not reqFile then return end
+
+        -- Read 4-byte header
+        local header = reqFile:read(4)
+        if not header or #header < 4 then
+            reqFile:close()
+            return
+        end
+
+        local b1, b2, b3, b4 = string.byte(header, 1, 4)
+        local len = b1 + (b2 * 256) + (b3 * 65536) + (b4 * 16777216)
+        if len <= 0 or len >= 32 * 1024 * 1024 then
+            reqFile:close()
+            return
+        end
+
+        -- Read payload
+        local payload = reqFile:read(len)
+        reqFile:close()
+        if not payload or #payload < len then return end
+
+        -- Process command (runs on main thread, GUI freezes here)
+        serverState.connected = true
+        local response = executeCommand(payload)
+
+        -- Write response to response FIFO
+        local respLen = #response
+        local respHeader = string.char(
+            respLen % 256,
+            math.floor(respLen / 256) % 256,
+            math.floor(respLen / 65536) % 256,
+            math.floor(respLen / 16777216) % 256
+        )
+
+        local respFile = io.open(FIFO_RESPONSE, "wb")
+        if respFile then
+            respFile:write(respHeader .. response)
+            respFile:flush()
+            respFile:close()
+        end
+    end
+
+    pollTimer.Enabled = true
+    serverState.pollTimer = pollTimer
+end
+
+
 function StartMCPBridge()
     StopMCPBridge()
 
@@ -6026,10 +6100,14 @@ function StartMCPBridge()
     if transport == "pipe" then
         log(string.format("[MCP v%s] MCP Server Listening on: %s", VERSION, PIPE_NAME))
         serverState.workerThread = createThread(PipeWorker)
-    elseif type(createThread) == "function" then
-        serverState.workerThread = createThread(TCPWorker)
-    else
-        startPollingTCPServer()
+    elseif transport == "tcp" then
+        if type(createThread) == "function" then
+            serverState.workerThread = createThread(TCPWorker)
+        else
+            startPollingTCPServer()
+        end
+    elseif transport == "fifo" then
+        startFIFOServer()
     end
 end
 
