@@ -10,9 +10,8 @@ local VERSION = "12.0.0"
 local TRANSPORT_MODE = "auto"   -- "pipe" | "tcp" | "fifo" | "auto"
 local TCP_HOST = "127.0.0.1"   -- bind address (change to "0.0.0.0" for LAN)
 local TCP_PORT = 28015           -- TCP listen port
--- FIFO paths (macOS fallback when LuaSocket unavailable)
-local FIFO_REQUEST  = "/tmp/ce_mcp_request"
-local FIFO_RESPONSE = "/tmp/ce_mcp_response"
+-- FIFO paths are in serverState.fifoRequest / serverState.fifoResponse
+-- (avoids adding top-level locals — Lua 5.3 has a 200 local limit)
 
 -- Global State
 local serverState = {
@@ -26,7 +25,9 @@ local serverState = {
     breakpoints = {},
     breakpoint_hits = {},
     hw_bp_slots = {},      -- Hardware breakpoint slots (max 4)
-    active_watches = {}    -- DBVM watch IDs for hypervisor-level tracing
+    active_watches = {},   -- DBVM watch IDs for hypervisor-level tracing
+    fifoRequest = "/tmp/ce_mcp_request",
+    fifoResponse = "/tmp/ce_mcp_response"
 }
 
 -- ============================================================================
@@ -6027,8 +6028,8 @@ end
 
 local function startFIFOServer()
     log(string.format("[MCP v%s] MCP Server using FIFO transport", VERSION))
-    log("[MCP] Request FIFO:  " .. FIFO_REQUEST)
-    log("[MCP] Response FIFO: " .. FIFO_RESPONSE)
+    log("[MCP] Request FIFO:  " .. serverState.fifoRequest)
+    log("[MCP] Response FIFO: " .. serverState.fifoResponse)
     log("[MCP] Ensure tcp_fifo_proxy.py is running!")
 
     local pollTimer = createTimer(nil)
@@ -6036,7 +6037,7 @@ local function startFIFOServer()
 
     pollTimer.OnTimer = function()
         -- Try to open request FIFO (non-blocking attempt)
-        local reqFile = io.open(FIFO_REQUEST, "rb")
+        local reqFile = io.open(serverState.fifoRequest, "rb")
         if not reqFile then return end
 
         -- Read 4-byte header
@@ -6071,7 +6072,7 @@ local function startFIFOServer()
             math.floor(respLen / 16777216) % 256
         )
 
-        local respFile = io.open(FIFO_RESPONSE, "wb")
+        local respFile = io.open(serverState.fifoResponse, "wb")
         if respFile then
             respFile:write(respHeader .. response)
             respFile:flush()
