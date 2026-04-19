@@ -4,5 +4,5 @@
 # MCP SDK (Model Context Protocol) - Required for AI agent communication
 mcp>=1.0.0
 
-# Windows API bindings - Required for Named Pipe communication
-pywin32>=306
+# Windows API bindings - Required for Named Pipe transport (Windows only)
+pywin32>=306; sys_platform == 'win32'

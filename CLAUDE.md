@@ -41,7 +41,7 @@ AI client ──(MCP / JSON-RPC over stdio)──▶ mcp_cheatengine.py
 
 ### Python side — `MCP_Server/mcp_cheatengine.py`
 
-Thin `FastMCP` wrapper. Every `@mcp.tool()` is a one-liner that calls `ce_client.send_command("<method>", {...})` and formats the result. `CEBridgeClient.send_command` writes a 4-byte little-endian length prefix + UTF-8 JSON-RPC body to the Named Pipe, reads the same framing back, caps responses at 16 MB, and auto-reconnects once on pipe failure.
+Thin `FastMCP` wrapper. Every `@mcp.tool()` is a one-liner that calls `ce_client.send_command("<method>", {...})` and formats the result. The bridge client writes a 4-byte little-endian length prefix + UTF-8 JSON-RPC body to the active transport, reads the same framing back, caps responses at 32 MB, and auto-reconnects once on connection failure.
 
 **Windows stdio pitfalls (top of file, before any other imports)** — do not move this block:
 - The MCP SDK's `stdio_server` wraps stdio with `TextIOWrapper` without `newline='\n'`, so on Windows it emits `\r\n` and the transport rejects with "invalid trailing data." The file monkey-patches `mcp.server.stdio.stdio_server` **and** `mcp.server.fastmcp.server.stdio_server` (FastMCP captures a reference at import time, so patching only the first module is a silent no-op).
@@ -67,11 +67,11 @@ Two files are the source of truth — there's no codegen, so you must edit both:
 
 ## Environment & safety constraints
 
-- **Windows only.** Named Pipe access via `pywin32`; no plans for cross-platform.
+- **Transport:** `CE_MCP_URI` controls the Python-side connection. Use `pipe` (default on Windows with `pywin32`) or `tcp:HOST:PORT` for LAN / non-Windows CE builds. Default TCP port is `28015`. The Lua script auto-detects transport: pipe if `createPipe` exists, TCP otherwise. Set `TCP_HOST = "0.0.0.0"` in the Lua config to accept LAN connections. Set `TRANSPORT_MODE` in `ce_mcp_bridge.lua` to force `"pipe"`, `"tcp"`, or `"auto"`.
 - **Cheat Engine prerequisite**: CE → Settings → Extra → **disable "Query memory region routines"**. With it enabled, memory scans on DBVM-protected pages trigger `CLOCK_WATCHDOG_TIMEOUT` BSODs. This is documented as a hard requirement in both `README.md` and `AI_Context/AI_Guide_MCP_Server_Implementation.md`; don't weaken the assumption without testing.
-- **Pipe name** `\\.\pipe\CE_MCP_Bridge_v99` is hardcoded in both `mcp_cheatengine.py` (as `PIPE_NAME`) and `ce_mcp_bridge.lua` (as `PIPE_NAME`). Keep them in sync if you ever rename it. The `_v99` suffix is the wire-protocol version and is independent of the bridge version (`12.0.0`).
+- **Pipe name** and **TCP port**: Pipe is `\\.\pipe\CE_MCP_Bridge_v99`, TCP default port is `28015`. `WIRE_PROTOCOL_VERSION = 99` is the shared version constant in both bridge files. Keep the pipe name suffix and `WIRE_PROTOCOL_VERSION` in sync. The Python side also uses it for the TCP handshake.
 - **Anti-cheat safety** (per `AI_Context/AI_Guide_MCP_Server_Implementation.md`): prefer hardware DR0–DR3 breakpoints over software (`0xCC`) breakpoints, and prefer DBVM watches for truly invisible tracing. The existing `cmd_set_breakpoint` already uses `debug_setBreakpoint` (hardware); keep new debugging tools on that path.
-- **Env vars:** `CE_MCP_TIMEOUT` (default 30s) limits per-tool latency; `CE_MCP_ALLOW_SHELL=1` enables `run_command` / `shell_execute` (default: disabled).
+- **Env vars:** `CE_MCP_TIMEOUT` (default 30s) limits per-tool latency; `CE_MCP_URI` selects `pipe` or `tcp:HOST:PORT`; `CE_MCP_ALLOW_SHELL=1` enables `run_command` / `shell_execute` (default: disabled).
 
 ## Conventions (v12 overhaul)
 

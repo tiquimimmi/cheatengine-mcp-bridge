@@ -8,6 +8,38 @@
 
 ---
 
+## Connection Setup
+
+The bridge supports two transports with the same wire protocol:
+
+- **Named Pipe**: `\\.\pipe\CE_MCP_Bridge_v99` (default on Windows when `pywin32` is available)
+- **TCP**: `tcp:HOST:PORT` via `CE_MCP_URI` (default `tcp::28015` on non-Windows)
+
+### Python-side transport selection
+
+Set `CE_MCP_URI` before starting `mcp_cheatengine.py` or `test_mcp.py`:
+
+| Value | Meaning |
+|-------|---------|
+| `pipe` | Force Named Pipe transport |
+| `tcp:HOST:PORT` | Connect to a specific TCP endpoint |
+| `tcp::PORT` | Use localhost with a custom port |
+| `tcp:HOST` | Use default port `28015` |
+
+### Lua-side transport selection
+
+Configure these values at the top of `ce_mcp_bridge.lua`:
+
+```lua
+local TRANSPORT_MODE = "auto"   -- "pipe" | "tcp" | "auto"
+local TCP_HOST = "127.0.0.1"
+local TCP_PORT = 28015
+```
+
+`TRANSPORT_MODE = "auto"` prefers pipes when `createPipe` is available, otherwise TCP. Set `TCP_HOST = "0.0.0.0"` to accept LAN connections. TCP transport has no authentication; only expose it on trusted networks.
+
+---
+
 ## Table of Contents
 
 1. [Basic & Utility](#1-basic--utility)
@@ -55,6 +87,8 @@
 **Returns:** JSON with:
 - `success` (bool)
 - `version` (str): Bridge version string.
+- `protocol_version` (int): Shared wire protocol version.
+- `transport` (str): Active transport (`"pipe"` or `"tcp"`).
 - `timestamp` (int): Unix timestamp.
 - `message` (str): Status message.
 
@@ -65,7 +99,7 @@
 
 **Example response:**
 ```json
-{"success": true, "version": "12.0.0", "timestamp": 1733540000, "message": "CE MCP Bridge alive"}
+{"success": true, "version": "12.0.0", "protocol_version": 99, "transport": "pipe", "timestamp": 1733540000, "message": "CE MCP Bridge v12.0.0 alive"}
 ```
 
 **Usage**: Call this first to verify connectivity before performing operations.
@@ -3238,8 +3272,8 @@ All commands return `success: false` with an `error` field on failure:
 | `"No free hardware breakpoint slots"` | All 4 debug registers (DR0-DR3) are in use. | Call `clear_all_breakpoints` to free slots. |
 | `"DBK driver not loaded"` | DBK/DBVM kernel driver not initialized. | Load DBK driver in CE settings. |
 | `"DBVM watch returned nil"` | DBVM not activated in CE settings. | Enable DBVM in Edit → Settings → Debugger. |
-| `"Cheat Engine Bridge not running"` | Named pipe not found. | Start CE with `ce_mcp_bridge.lua` loaded. |
-| `"Response too large"` | Pipe response exceeded 16 MB limit. | Reduce `size` or `max` parameter. |
+| `"Cheat Engine Bridge not running"` | Named pipe transport is unavailable. | Start CE with `ce_mcp_bridge.lua` loaded or switch to TCP with `CE_MCP_URI=tcp:HOST:PORT`. |
+| `"Response too large"` | Bridge response exceeded 32 MB limit. | Reduce `size` or `max` parameter. |
 | `"Pipe Communication failed"` | Named pipe connection lost. | Bridge auto-reconnects on next call. |
 | `"Invalid JSON received from CE"` | Corrupt pipe response. | Usually transient; retry the command. |
 | `"Shell execution disabled"` | `run_command` or `shell_execute` called without `CE_MCP_ALLOW_SHELL=1`. | Set environment variable to enable. |
