@@ -143,12 +143,14 @@ sys.stdout = _mcp_stdout
 
 - [ ] **Step 2: Add WIRE_PROTOCOL_VERSION constant**
 
-At line 135 of `mcp_cheatengine.py`, alongside the existing constants:
+At line 135 of `mcp_cheatengine.py`, replace the hardcoded pipe name and add the version constant:
 
 ```python
-PIPE_NAME = r"\\.\pipe\CE_MCP_Bridge_v99"
 WIRE_PROTOCOL_VERSION = 99
+PIPE_NAME = r"\\.\pipe\CE_MCP_Bridge_v" + str(WIRE_PROTOCOL_VERSION)
 ```
+
+This ensures PIPE_NAME and WIRE_PROTOCOL_VERSION share a single source of truth, matching the Lua side pattern from Task 1.
 
 - [ ] **Step 3: Extract BaseBridgeClient**
 
@@ -161,7 +163,7 @@ class BaseBridgeClient(ABC):
     """Shared wire protocol: 4-byte LE framing, JSON-RPC, timeout, retry."""
 
     def __init__(self):
-        pass
+        self.timeout_seconds = CE_MCP_TIMEOUT_SECONDS  # from env, None = disabled
 
     @abstractmethod
     def _connect(self):
@@ -228,17 +230,20 @@ class BaseBridgeClient(ABC):
     def send_command(self, method: str, params: dict = None):
         """Send command with retry-once on connection failure.
 
-        Catches (ConnectionError, TimeoutError, OSError) for transport-agnostic
-        error handling. Subclass I/O methods should convert transport-specific
-        errors to these types (e.g., PipeBridgeClient wraps pywintypes.error).
+        Both _connect() and the exchange are inside the try block so that
+        connection failures (unreachable host, version mismatch) trigger
+        the retry path with proper cleanup. Catches (ConnectionError,
+        TimeoutError, OSError) for transport-agnostic error handling.
+        Subclass I/O methods should convert transport-specific errors
+        to these types (e.g., PipeBridgeClient wraps pywintypes.error).
         """
         max_retries = 2
         last_error = None
         for attempt in range(max_retries):
-            if not self._is_connected():
-                self._connect()
-
             try:
+                if not self._is_connected():
+                    self._connect()
+
                 req_bytes = self._build_request(method, params)
                 response = self._exchange_with_timeout(req_bytes, method)
                 if 'error' in response:
@@ -377,7 +382,8 @@ class TCPBridgeClient(BaseBridgeClient):
 
     def _connect(self):
         self.sock = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_STREAM)
-        connect_timeout = CE_MCP_TIMEOUT_SECONDS if CE_MCP_TIMEOUT_SECONDS > 0 else 30
+        # CE_MCP_TIMEOUT_SECONDS is None when disabled (CE_MCP_TIMEOUT<=0)
+        connect_timeout = CE_MCP_TIMEOUT_SECONDS if CE_MCP_TIMEOUT_SECONDS else 30
         self.sock.settimeout(connect_timeout)
         self.sock.connect((self.host, self.port))
         self.sock.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_KEEPALIVE, 1)
@@ -491,18 +497,16 @@ This task adds the config variables, `loadSocketLib()`, and `detectTransport()` 
 
 - [ ] **Step 1: Add TCP config variables**
 
-After the `VERSION` line at the top of `ce_mcp_bridge.lua`:
+After the constants added in Task 1 (`WIRE_PROTOCOL_VERSION`, `PIPE_NAME`, `VERSION` — already at the top of `ce_mcp_bridge.lua`), add only the new transport config:
 
 ```lua
-local WIRE_PROTOCOL_VERSION = 99
-local PIPE_NAME = "CE_MCP_Bridge_v" .. WIRE_PROTOCOL_VERSION
-local VERSION = "12.0.0"
-
--- Transport configuration
+-- Transport configuration (add after VERSION line)
 local TRANSPORT_MODE = "auto"   -- "pipe" | "tcp" | "auto"
 local TCP_HOST = "127.0.0.1"   -- bind address (change to "0.0.0.0" for LAN)
 local TCP_PORT = 28015          -- TCP listen port
 ```
+
+**Note:** Do NOT re-add `WIRE_PROTOCOL_VERSION` or `PIPE_NAME` — they were already added in Task 1 Step 1.
 
 - [ ] **Step 2: Add LuaSocket cpath setup and loadSocketLib**
 
@@ -520,9 +524,15 @@ local function setupSocketCpath()
         scriptPath = extractDir(getMainForm().getAutoAttachList().getScript())
     end)
     if scriptPath then
+        -- LuaSocket installs as socket/core.so (nested) or socket.so (flat)
+        -- Add both patterns to cover standard and custom layouts
         package.cpath = scriptPath .. "/lib/?.so;" ..
                         scriptPath .. "/lib/?.dll;" ..
+                        scriptPath .. "/lib/?/core.so;" ..
+                        scriptPath .. "/lib/?/core.dll;" ..
                         package.cpath
+    else
+        log("[MCP] WARNING: Could not determine script directory for LuaSocket cpath")
     end
 end
 setupSocketCpath()
@@ -726,14 +736,16 @@ local function TCPWorker(thread)
             end
 
             local function writeFn(data)
+                -- LuaSocket send() returns (lastIndex, err, partialIndex)
+                -- where indices are absolute byte positions (1-based), NOT counts
                 local total = #data
                 local sent = 0
                 while sent < total do
-                    local i, sendErr, partial = client:send(data, sent + 1)
+                    local i, sendErr, partialIdx = client:send(data, sent + 1)
                     if i then
-                        sent = i
-                    elseif partial and partial > 0 then
-                        sent = sent + partial
+                        sent = i  -- absolute index of last byte sent
+                    elseif partialIdx then
+                        sent = partialIdx  -- absolute index, NOT relative
                     else
                         error("TCP send failed: " .. (sendErr or "unknown"))
                     end
@@ -845,9 +857,9 @@ local function startPollingTCPServer()
         local fullMsg = hdr .. response
         local sent = 0
         while sent < #fullMsg do
-            local i, sendErr, partial = client:send(fullMsg, sent + 1)
+            local i, sendErr, partialIdx = client:send(fullMsg, sent + 1)
             if i then sent = i
-            elseif partial and partial > 0 then sent = sent + partial
+            elseif partialIdx then sent = partialIdx  -- absolute index, NOT relative
             else
                 pcall(function() client:close() end)
                 client = nil; serverState.tcpClient = nil; serverState.connected = false
@@ -986,12 +998,14 @@ except ImportError:
 
 - [ ] **Step 2: Add CE_MCP_URI parsing and transport constants**
 
-After the existing constants at lines 23-25 (`PIPE_NAME`, `MAX_RESPONSE_BYTES`, `EXPECTED_VERSION_PREFIX`), add the new constants:
+Replace and extend the constants at lines 23-25. Derive `PIPE_NAME` from `WIRE_PROTOCOL_VERSION` so they stay in sync:
 
 ```python
-# existing constants stay as-is (lines 23-25)
-DEFAULT_TCP_PORT = 28015
 WIRE_PROTOCOL_VERSION = 99
+PIPE_NAME = r"\\.\pipe\CE_MCP_Bridge_v" + str(WIRE_PROTOCOL_VERSION)
+MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+EXPECTED_VERSION_PREFIX = "12."
+DEFAULT_TCP_PORT = 28015
 
 def _parse_test_uri():
     """Parse CE_MCP_URI env var for test transport."""
@@ -1179,6 +1193,8 @@ git commit -m "fix: make pywin32 conditional on Windows in requirements.txt"
 
 ### Task 8: Create LuaSocket lib directory and README
 
+**Note:** This task creates the directory structure and build instructions for LuaSocket. The actual `.so`/`.dll` binaries must be compiled per-platform by the user following the instructions, or pre-built binaries can be added later. The `.gitignore` excludes binaries since they are platform-specific. A fresh checkout will NOT have the runtime dependency — users must follow `MCP_Server/lib/README.md` to build/install LuaSocket before TCP transport works.
+
 **Files:**
 - Create: `MCP_Server/lib/README.md`
 - Create: `MCP_Server/lib/.gitkeep`
@@ -1276,6 +1292,8 @@ In the **Environment & safety constraints** section, add a new bullet:
 ```markdown
 - **Transport:** `CE_MCP_URI` env var controls connection. `pipe` (default on Windows with pywin32), `tcp:HOST:PORT` for LAN/Mac. Default TCP port is 28015. The Lua script auto-detects: pipe if `createPipe` exists, TCP otherwise. Set `TCP_HOST = "0.0.0.0"` in the Lua config to accept LAN connections. Set `TRANSPORT_MODE` at the top of `ce_mcp_bridge.lua` to force a specific transport (`"pipe"`, `"tcp"`, or `"auto"`).
 ```
+
+Also fix the outdated "16 MB" cap reference in CLAUDE.md — the actual cap is 32 MB (see `MAX_RESPONSE_SIZE_BYTES` in `mcp_cheatengine.py:137` and the Lua validation at `ce_mcp_bridge.lua:5647`). Update "caps responses at 16 MB" to "caps responses at 32 MB".
 
 Also update the **Pipe name** bullet to mention the shared `WIRE_PROTOCOL_VERSION`:
 
@@ -1413,11 +1431,20 @@ CE_MCP_URI=tcp:WINDOWS_IP:28015 python MCP_Server/test_mcp.py
 
 - [ ] **Step 4: Verify error cases**
 
-- `CE_MCP_URI=pipe` on non-Windows → clear error message
-- TCP to wrong port → connection refused
-- TCP version mismatch (modify `WIRE_PROTOCOL_VERSION` temporarily) → hard failure
+- `CE_MCP_URI=pipe` on non-Windows → clear RuntimeError message
+- TCP to wrong port → connection refused within CE_MCP_TIMEOUT
+- TCP version mismatch (modify `WIRE_PROTOCOL_VERSION` temporarily) → hard failure with clear message
+- TCP to non-routable IP → connect timeout ≤30s (not OS default ~120s)
+- CE script reload during active TCP connection → clean teardown via StopMCPBridge, new accept loop
 
-- [ ] **Step 5: Final commit**
+- [ ] **Step 5: Verify LuaSocket fallback behavior**
+
+If LuaSocket is NOT installed:
+- `TRANSPORT_MODE = "auto"` on Windows → falls back to pipe, logs no error
+- `TRANSPORT_MODE = "tcp"` without LuaSocket → clear error: "LuaSocket not found"
+- `TRANSPORT_MODE = "auto"` without `createPipe` AND without LuaSocket → clear error: "No transport available"
+
+- [ ] **Step 6: Final commit**
 
 ```bash
 git add -A
